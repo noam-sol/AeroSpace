@@ -22,14 +22,11 @@ extension Thread {
             try await withCheckedThrowingContinuation { cont in
                 // It's unsafe to implicitly cancel because cont.resume should be invoked exactly once
                 self.runInLoopAsync(job: job, autoCheckCancelled: false) { job in
-                    if job.isCancelled {
-                        cont.resume(throwing: CancellationError())
-                    } else {
-                        do {
-                            cont.resume(returning: try body(job))
-                        } catch {
-                            cont.resume(throwing: error)
-                        }
+                    do {
+                        try job.checkCancellation()
+                        cont.resume(returning: try body(job))
+                    } catch {
+                        cont.resume(throwing: error)
                     }
                 }
             }

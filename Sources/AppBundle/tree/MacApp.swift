@@ -13,6 +13,8 @@ final class MacApp: AbstractApp {
     private let appAxSubscriptions: ThreadGuardedValue<[AxSubscription]> // keep subscriptions in memory
     private let windows: ThreadGuardedValue<[UInt32: AxWindow]> = .init([:])
     private var thread: Thread?
+    private var setFrameJobs: [UInt32: RunLoopJob] = [:]
+    @MainActor private static var focusJob: RunLoopJob? = nil
 
     /*conforms*/ var name: String? { nsApp.localizedName }
     /*conforms*/ var execPath: String? { nsApp.executableURL?.path }
@@ -50,9 +52,8 @@ final class MacApp: AbstractApp {
             let thread = Thread {
                 $axTaskLocalAppThreadToken.withValue(AxAppThreadToken(pid: pid, idForDebug: nsApp.idForDebug)) {
                     let axApp = AXUIElementCreateApplication(nsApp.processIdentifier)
-                    var ticker = IntTicker(value: 0)
                     let handlers: HandlerToNotifKeyMapping = [
-                        .init(key: ticker.incAndGet(), value: refreshObs): [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification],
+                        (refreshObs, [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification]),
                     ]
                     let subscriptions = AxSubscription.bulkSubscribe(nsApp, axApp, handlers)
                     if !subscriptions.isEmpty {
@@ -103,18 +104,16 @@ final class MacApp: AbstractApp {
         return try await MacWindow.getOrRegister(windowId: windowId, macApp: self)
     }
 
-    @MainActor private static var focusJob: RunLoopJob? = nil
     @MainActor func nativeFocus(_ windowId: UInt32) {
         MacApp.focusJob?.cancel()
         MacApp.focusJob = withWindowAsync(windowId) { [nsApp] window, job in
             // Raise firstly to make sure that by the time we activate the app, the window would be already on top
             window.set(Ax.isMainAttr, true)
-            _ = window.raise()
+            AXUIElementPerformAction(window, kAXRaiseAction as CFString)
             nsApp.activate(options: .activateIgnoringOtherApps)
         }
     }
 
-    private var setFrameJobs: [UInt32: RunLoopJob] = [:]
     func setAxFrame(_ windowId: UInt32, _ topLeft: CGPoint?, _ size: CGSize?) {
         setFrameJobs.removeValue(forKey: windowId)?.cancel()
         setFrameJobs[windowId] = withWindowAsync(windowId) { [axApp] window, job in
@@ -331,11 +330,10 @@ private class AxWindow {
 
     static func new(windowId: UInt32, _ ax: AXUIElement, _ nsApp: NSRunningApplication) -> AxWindow? {
         guard let id = ax.containingWindowId() else { return nil }
-        var ticker = IntTicker(value: 0)
         let handlers: HandlerToNotifKeyMapping = [
-            .init(key: ticker.incAndGet(), value: refreshObs): [kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification],
-            .init(key: ticker.incAndGet(), value: movedObs): [kAXMovedNotification],
-            .init(key: ticker.incAndGet(), value: resizedObs): [kAXResizedNotification],
+            (refreshObs, [kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification]),
+            (movedObs, [kAXMovedNotification]),
+            (resizedObs, [kAXResizedNotification]),
         ]
         let subscriptions = AxSubscription.bulkSubscribe(nsApp, ax, handlers)
         return !subscriptions.isEmpty ? AxWindow(windowId: id, ax, subscriptions) : nil
@@ -388,4 +386,4 @@ private func disableAnimations<T>(app: AXUIElement, _ body: () -> T) -> T {
     return body()
 }
 
-public typealias Continuation<T> = CheckedContinuation<T, Never>
+typealias Continuation<T> = CheckedContinuation<T, Never>

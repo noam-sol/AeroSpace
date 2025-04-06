@@ -302,18 +302,14 @@ private func tryGetWindow(_ any: Any?) -> AXUIElement? {
 extension AXUIElement {
     func get<Attr: ReadableAttr>(_ attr: Attr) -> Attr.T? {
         let state = signposter.beginInterval(#function, "axTaskLocalAppThreadToken: \(axTaskLocalAppThreadToken?.idForDebug)")
-        defer {
-            signposter.endInterval(#function, state)
-        }
+        defer { signposter.endInterval(#function, state) }
         var raw: AnyObject?
         return AXUIElementCopyAttributeValue(self, attr.key as CFString, &raw) == .success ? attr.getter(raw!) : nil
     }
 
     @discardableResult func set<Attr: WritableAttr>(_ attr: Attr, _ value: Attr.T) -> Bool {
         let state = signposter.beginInterval(#function, "axTaskLocalAppThreadToken: \(axTaskLocalAppThreadToken?.idForDebug)")
-        defer {
-            signposter.endInterval(#function, state)
-        }
+        defer { signposter.endInterval(#function, state) }
         guard let value = attr.setter(value) else { return false }
         return AXUIElementSetAttributeValue(self, attr.key as CFString, value) == .success
     }
@@ -331,10 +327,6 @@ extension AXUIElement {
         guard let topLeft = get(Ax.topLeftCornerAttr) else { return nil }
         guard let size = get(Ax.sizeAttr) else { return nil }
         return CGPoint(x: topLeft.x + size.width / 2, y: topLeft.y + size.height)
-    }
-
-    func raise() -> Bool {
-        AXUIElementPerformAction(self, kAXRaiseAction as CFString) == AXError.success
     }
 }
 
