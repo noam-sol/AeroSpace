@@ -36,7 +36,7 @@ extension Thread {
     }
 }
 
-final class RunLoopAction: NSObject {
+private final class RunLoopAction: NSObject {
     private let _action: (RunLoopJob) -> ()
     let job: RunLoopJob
     private let autoCheckCancelled: Bool
@@ -51,7 +51,7 @@ final class RunLoopAction: NSObject {
     }
 }
 
-final class RunLoopJob: Sendable, AeroAny {
+final class RunLoopJob: Sendable, AeroAny { // todo rename to SyncJob
     private let cancellationLatch = OneTimeLatch()
     var isCancelled: Bool { cancellationLatch.isTriggered }
     func cancel() { cancellationLatch.trigger() }

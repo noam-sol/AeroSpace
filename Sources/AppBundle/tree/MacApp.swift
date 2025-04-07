@@ -48,25 +48,30 @@ final class MacApp: AbstractApp {
         try checkCancellation()
         if !wipPids.insert(pid).inserted { return nil } // todo think if it's better to wait or return nil
         defer { wipPids.remove(pid) }
-        let app = await withCheckedContinuation { (cont: Continuation<MacApp?>) in
-            let thread = Thread {
-                $axTaskLocalAppThreadToken.withValue(AxAppThreadToken(pid: pid, idForDebug: nsApp.idForDebug)) {
-                    let axApp = AXUIElementCreateApplication(nsApp.processIdentifier)
-                    let handlers: HandlerToNotifKeyMapping = [
-                        (refreshObs, [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification]),
-                    ]
-                    let subscriptions = AxSubscription.bulkSubscribe(nsApp, axApp, handlers)
-                    if !subscriptions.isEmpty {
-                        let app = MacApp(nsApp, axApp, subscriptions, Thread.current)
-                        cont.resume(returning: app)
-                        CFRunLoopRun()
-                    } else {
-                        cont.resume(returning: nil)
+        let job = RunLoopJob()
+        let app = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<MacApp?, any Error>) in // todo make cancelable
+                let thread = Thread {
+                    $axTaskLocalAppThreadToken.withValue(AxAppThreadToken(pid: pid, idForDebug: nsApp.idForDebug)) {
+                        let axApp = AXUIElementCreateApplication(nsApp.processIdentifier)
+                        let handlers: HandlerToNotifKeyMapping = [
+                            (refreshObs, [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification]),
+                        ]
+                        do {
+                            let subscriptions = try AxSubscription.bulkSubscribe(nsApp, axApp, job, handlers)
+                            let app = MacApp(nsApp, axApp, subscriptions, Thread.current)
+                            cont.resume(returning: app)
+                            CFRunLoopRun()
+                        } catch {
+                            cont.resume(throwing: error)
+                        }
                     }
                 }
+                thread.name = "app-dedicated-thread \(nsApp.idForDebug)"
+                thread.start()
             }
-            thread.name = "app-dedicated-thread \(nsApp.idForDebug)"
-            thread.start()
+        } onCancel: {
+            job.cancel()
         }
         if let app {
             allAppsMap[pid] = app
@@ -98,7 +103,9 @@ final class MacApp: AbstractApp {
     @MainActor // todo swift is stupid
     func getFocusedWindow() async throws -> Window? {
         let windowId = try await thread?.runInLoop { [nsApp, axApp, windows] job in
-            axApp.threadGuarded.get(Ax.focusedWindowAttr).flatMap { windows.threadGuarded.getOrRegisterAxWindow($0, nsApp) }?.windowId
+            try axApp.threadGuarded.get(Ax.focusedWindowAttr)
+                .flatMap { try windows.threadGuarded.getOrRegisterAxWindow($0, nsApp, job) }?
+                .windowId
         }
         guard let windowId else { return nil }
         return try await MacWindow.getOrRegister(windowId: windowId, macApp: self)
@@ -300,7 +307,7 @@ final class MacApp: AbstractApp {
 
             for window in axApp.threadGuarded.get(Ax.windowsAttr) ?? [] {
                 try job.checkCancellation()
-                result.getOrRegisterAxWindow(window, nsApp)
+                try result.getOrRegisterAxWindow(window, nsApp, job)
             }
 
             windows.threadGuarded = result
@@ -335,36 +342,33 @@ private class AxWindow {
         self.axSubscriptions = axSubscriptions
     }
 
-    static func new(windowId: UInt32, _ ax: AXUIElement, _ nsApp: NSRunningApplication) -> AxWindow? {
+    static func new(windowId: UInt32, _ ax: AXUIElement, _ nsApp: NSRunningApplication, _ job: RunLoopJob) throws -> AxWindow? {
         guard let id = ax.containingWindowId() else { return nil }
         let handlers: HandlerToNotifKeyMapping = [
             (refreshObs, [kAXUIElementDestroyedNotification, kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification]),
             (movedObs, [kAXMovedNotification]),
             (resizedObs, [kAXResizedNotification]),
         ]
-        let subscriptions = AxSubscription.bulkSubscribe(nsApp, ax, handlers)
-        return !subscriptions.isEmpty ? AxWindow(windowId: id, ax, subscriptions) : nil
+        let subscriptions = try AxSubscription.bulkSubscribe(nsApp, ax, job, handlers)
+        return AxWindow(windowId: id, ax, subscriptions)
     }
 }
 
 extension [UInt32: AxWindow] {
     @discardableResult
-    fileprivate mutating func getOrRegisterAxWindow(_ axWindow: AXUIElement, _ nsApp: NSRunningApplication) -> AxWindow? {
+    fileprivate mutating func getOrRegisterAxWindow(_ axWindow: AXUIElement, _ nsApp: NSRunningApplication, _ job: RunLoopJob) throws -> AxWindow? {
         guard let id = axWindow.containingWindowId() else { return nil }
-        if let existing = self[id] {
-            return existing
-        } else {
-            // Delay new window detection if mouse is down
-            // It helps with apps that allow dragging their tabs out to create new windows
-            // https://github.com/nikitabobko/AeroSpace/issues/1001
-            if isLeftMouseButtonDown { return nil }
+        if let existing = self[id] { return existing }
+        // Delay new window detection if mouse is down
+        // It helps with apps that allow dragging their tabs out to create new windows
+        // https://github.com/nikitabobko/AeroSpace/issues/1001
+        if isLeftMouseButtonDown { return nil }
 
-            if let window = AxWindow.new(windowId: id, axWindow, nsApp) {
-                self[id] = window
-                return window
-            } else {
-                return nil
-            }
+        if let window = try AxWindow.new(windowId: id, axWindow, nsApp, job) {
+            self[id] = window
+            return window
+        } else {
+            return nil
         }
     }
 }
